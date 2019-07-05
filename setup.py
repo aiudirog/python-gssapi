@@ -10,6 +10,7 @@ import re
 import sys
 import os
 import shutil
+import shlex
 
 
 SKIP_CYTHON_FILE = '__dont_use_cython__.txt'
@@ -44,7 +45,7 @@ except ImportError:
 
 # get the compile and link args
 link_args, compile_args = [
-    os.environ[e].split() if e in os.environ else None
+    shlex.split(os.environ[e]) if e in os.environ else None
     for e in ['GSSAPI_LINKER_ARGS', 'GSSAPI_COMPILER_ARGS']
 ]
 
@@ -90,7 +91,7 @@ if link_args is None:
     elif os.environ.get('MINGW_PREFIX'):
         link_args = ['-lgss']
     else:
-        link_args = get_output('krb5-config --libs gssapi').split()
+        link_args = shlex.split(get_output('krb5-config --libs gssapi'))
 
 if compile_args is None:
     if osx_has_gss_framework:
@@ -103,7 +104,7 @@ if compile_args is None:
     elif os.environ.get('MINGW_PREFIX'):
         compile_args = ['-fPIC']
     else:
-        compile_args = get_output('krb5-config --cflags gssapi').split()
+        compile_args = shlex.split(get_output('krb5-config --cflags gssapi'))
 
 # add in the extra workarounds for different include structures
 if winkrb_path:
