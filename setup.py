@@ -5,6 +5,7 @@ from setuptools import setup
 from setuptools import Distribution
 from setuptools.command.sdist import sdist
 from setuptools.extension import Extension
+import subprocess
 import platform
 import re
 import sys
@@ -28,20 +29,18 @@ else:
               file=sys.stderr)
         SOURCE_EXT = 'c'
 
-get_output = None
 
-try:
-    import commands
-    get_output = commands.getoutput
-except ImportError:
-    import subprocess
+try:  # TODO: Remove this when Py27 is dropped
+    FileNotFoundError
+except NameError:
+    FileNotFoundError = IOError
 
-    def _get_output(*args, **kwargs):
-        res = subprocess.check_output(*args, shell=True, **kwargs)
-        decoded = res.decode('utf-8')
-        return decoded.strip()
 
-    get_output = _get_output
+def get_output(*args, **kwargs):
+    res = subprocess.check_output(*args, shell=True, **kwargs)
+    decoded = res.decode('utf-8')
+    return decoded.strip()
+
 
 # get the compile and link args
 link_args, compile_args = [
@@ -243,7 +242,7 @@ def extension(name_fmt, module, **kwargs):
         library_dirs=library_dirs,
         libraries=libraries,
         sources=[source],
-        **kwargs,
+        **kwargs
     )
 
 
@@ -357,5 +356,5 @@ setup(
         extension_file('password_add', 'gss_add_cred_with_password'),
     ]),
     keywords=['gssapi', 'security'],
-    install_requires=install_requires,
+    install_requires=install_requires
 )
