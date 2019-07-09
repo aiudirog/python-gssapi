@@ -231,14 +231,25 @@ class GSSAPIDistribution(Distribution, object):
         del self._cythonized_ext_modules
 
 
+def extension(name_fmt, module, **kwargs):
+    """Helper method to remove the repetition in extension declarations."""
+    source = name_fmt.replace('.', '/') % module + '.' + SOURCE_EXT
+    if not os.path.exists(source):
+        raise FileNotFoundError(source)
+    return Extension(
+        name_fmt % module,
+        extra_link_args=link_args,
+        extra_compile_args=compile_args,
+        library_dirs=library_dirs,
+        libraries=libraries,
+        sources=[source],
+        **kwargs,
+    )
+
+
 # detect support
 def main_file(module):
-    return Extension('gssapi.raw.%s' % module,
-                     extra_link_args=link_args,
-                     extra_compile_args=compile_args,
-                     library_dirs=library_dirs,
-                     libraries=libraries,
-                     sources=['gssapi/raw/%s.%s' % (module, SOURCE_EXT)])
+    return extension('gssapi.raw.%s', module)
 
 
 ENUM_EXTS = []
@@ -248,27 +259,17 @@ def extension_file(module, canary):
     if ENABLE_SUPPORT_DETECTION and not hasattr(GSSAPI_LIB, canary):
         print('Skipping the %s extension because it '
               'is not supported by your GSSAPI implementation...' % module)
-        return None
-    else:
-        enum_ext_path = 'gssapi/raw/_enum_extensions/ext_%s.%s' % (module,
-                                                                   SOURCE_EXT)
-        if os.path.exists(enum_ext_path):
-            ENUM_EXTS.append(
-                Extension('gssapi.raw._enum_extensions.ext_%s' % module,
-                          extra_link_args=link_args,
-                          extra_compile_args=compile_args,
-                          sources=[enum_ext_path],
-                          library_dirs=library_dirs,
-                          libraries=libraries,
-                          include_dirs=['gssapi/raw/']))
+        return
 
-        return Extension('gssapi.raw.ext_%s' % module,
-                         extra_link_args=link_args,
-                         extra_compile_args=compile_args,
-                         library_dirs=library_dirs,
-                         libraries=libraries,
-                         sources=['gssapi/raw/ext_%s.%s' % (module,
-                                                            SOURCE_EXT)])
+    try:
+        ENUM_EXTS.append(
+            extension('gssapi.raw._enum_extensions.ext_%s', module,
+                      include_dirs=['gssapi/raw/'])
+        )
+    except FileNotFoundError:
+        pass
+
+    return extension('gssapi.raw.ext_%s', module)
 
 
 def gssapi_modules(lst):
@@ -276,15 +277,10 @@ def gssapi_modules(lst):
     res = [mod for mod in lst if mod is not None]
 
     # add in supported mech files
-    MECHS_SUPPORTED = os.environ.get('GSSAPI_MECHS', 'krb5').split(',')
-    for mech in MECHS_SUPPORTED:
-        res.append(Extension('gssapi.raw.mech_%s' % mech,
-                             extra_link_args=link_args,
-                             extra_compile_args=compile_args,
-                             library_dirs=library_dirs,
-                             libraries=libraries,
-                             sources=['gssapi/raw/mech_%s.%s' % (mech,
-                                                                 SOURCE_EXT)]))
+    res.extend(
+        extension('gssapi.raw.mech_%s', mech)
+        for mech in os.environ.get('GSSAPI_MECHS', 'krb5').split(',')
+    )
 
     # add in any present enum extension files
     res.extend(ENUM_EXTS)
@@ -361,5 +357,5 @@ setup(
         extension_file('password_add', 'gss_add_cred_with_password'),
     ]),
     keywords=['gssapi', 'security'],
-    install_requires=install_requires
+    install_requires=install_requires,
 )
