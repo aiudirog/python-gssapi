@@ -30,12 +30,6 @@ else:
         SOURCE_EXT = 'c'
 
 
-try:  # TODO: Remove this when Py27 is dropped
-    FileNotFoundError
-except NameError:
-    FileNotFoundError = IOError
-
-
 def get_output(*args, **kwargs):
     res = subprocess.check_output(*args, shell=True, **kwargs)
     decoded = res.decode('utf-8')
@@ -230,11 +224,11 @@ class GSSAPIDistribution(Distribution, object):
         del self._cythonized_ext_modules
 
 
-def extension(name_fmt, module, **kwargs):
+def make_extension(name_fmt, module, **kwargs):
     """Helper method to remove the repetition in extension declarations."""
     source = name_fmt.replace('.', '/') % module + '.' + SOURCE_EXT
     if not os.path.exists(source):
-        raise FileNotFoundError(source)
+        raise OSError(source)
     return Extension(
         name_fmt % module,
         extra_link_args=link_args,
@@ -248,7 +242,7 @@ def extension(name_fmt, module, **kwargs):
 
 # detect support
 def main_file(module):
-    return extension('gssapi.raw.%s', module)
+    return make_extension('gssapi.raw.%s', module)
 
 
 ENUM_EXTS = []
@@ -262,13 +256,13 @@ def extension_file(module, canary):
 
     try:
         ENUM_EXTS.append(
-            extension('gssapi.raw._enum_extensions.ext_%s', module,
-                      include_dirs=['gssapi/raw/'])
+            make_extension('gssapi.raw._enum_extensions.ext_%s', module,
+                           include_dirs=['gssapi/raw/'])
         )
-    except FileNotFoundError:
+    except OSError:
         pass
 
-    return extension('gssapi.raw.ext_%s', module)
+    return make_extension('gssapi.raw.ext_%s', module)
 
 
 def gssapi_modules(lst):
@@ -277,7 +271,7 @@ def gssapi_modules(lst):
 
     # add in supported mech files
     res.extend(
-        extension('gssapi.raw.mech_%s', mech)
+        make_extension('gssapi.raw.mech_%s', mech)
         for mech in os.environ.get('GSSAPI_MECHS', 'krb5').split(',')
     )
 
