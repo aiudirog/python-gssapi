@@ -5,6 +5,7 @@ from setuptools import setup
 from setuptools import Distribution
 from setuptools.command.sdist import sdist
 from setuptools.extension import Extension
+import math
 import subprocess
 import platform
 import re
@@ -13,6 +14,8 @@ import os
 import shutil
 import shlex
 
+
+ARCH = int(math.log(sys.maxsize, 2)) + 1  # 64 or 32
 
 SKIP_CYTHON_FILE = '__dont_use_cython__.txt'
 
@@ -25,8 +28,7 @@ else:
         print("Building from Cython files...", file=sys.stderr)
         SOURCE_EXT = 'pyx'
     except ImportError:
-        print("Cython not found, building from C files...",
-              file=sys.stderr)
+        print("Cython not found, building from C files...", file=sys.stderr)
         SOURCE_EXT = 'c'
 
 
@@ -36,141 +38,200 @@ def get_output(*args, **kwargs):
     return decoded.strip()
 
 
-# get the compile and link args
-link_args, compile_args = [
-    shlex.split(os.environ[e]) if e in os.environ else None
-    for e in ['GSSAPI_LINKER_ARGS', 'GSSAPI_COMPILER_ARGS']
-]
+class Config:
+    def __init__(self):
+        def shsplit(value):
+            return value if isinstance(value, list) else shlex.split(value)
 
-osx_has_gss_framework = False
-if sys.platform == 'darwin':
-    mac_ver = [int(v) for v in platform.mac_ver()[0].split('.')]
-    osx_has_gss_framework = (mac_ver >= [10, 7, 0])
+        link_args = shsplit(
+            os.environ.get('GSSAPI_LINKER_ARGS')
+            or self._default_link_args
+        )
+        # Separate out specific types of link args to pass separately to
+        # Extension. This helps specific library dirs come before generic ones
+        # and allows the usage of other compilers with different cli arg styles
+        self.library_dirs, self.libraries, self.link_args = [], [], []
+        for arg in link_args:
+            if arg.startswith('-L'):
+                self.library_dirs.append(arg[2:])
+            elif arg.startswith('-l'):
+                self.libraries.append(arg[2:])
+            else:
+                self.link_args.append(arg)
 
-winkrb_path = None
-if os.name == 'nt':
-    # Try to find location of MIT kerberos
-    # First check program files of the appropriate architecture
-    _pf_path = os.path.join(os.environ['ProgramFiles'], 'MIT', 'Kerberos')
-    if os.path.exists(_pf_path):
-        winkrb_path = _pf_path
-    else:
-        # Try to detect kinit in PATH
-        _kinit_path = shutil.which('kinit')
-        if _kinit_path is None:
-            print("Failed find MIT kerberos!")
+        self.compile_args = shsplit(
+            os.environ.get('GSSAPI_COMPILER_ARGS')
+            or self._default_compile_args
+        )
+
+        # add in the extra workarounds for different include structures
+        ext_h = os.path.join(self._prefix, 'include/gssapi/gssapi_ext.h')
+        if os.path.exists(ext_h):
+            self.compile_args.append("-DHAS_GSSAPI_EXT_H")
+
+        self.enable_support_detect = \
+            os.environ.get('GSSAPI_SUPPORT_DETECT', 'true').lower() == 'true'
+
+        if self.enable_support_detect:
+            try:
+                main_lib = os.environ['GSSAPI_MAIN_LIB']
+            except KeyError:
+                main_lib = self._gssapi_lib_path
+            if main_lib is None:
+                raise Exception(
+                    "Could not find main GSSAPI shared library. Please "
+                    "try setting GSSAPI_MAIN_LIB yourself or "
+                    "setting ENABLE_SUPPORT_DETECTION to 'false'"
+                )
+            import ctypes
+            self.gssapi_lib = ctypes.CDLL(main_lib)
         else:
-            winkrb_path = os.path.dirname(os.path.dirname(_kinit_path))
+            self.gssapi_lib = None
 
-    # Monkey patch distutils if it throws errors getting msvcr.
-    # For MinGW it won't need it.
-    from distutils import cygwinccompiler
-    try:
-        cygwinccompiler.get_msvcr()
-    except ValueError:
-        cygwinccompiler.get_msvcr = lambda *a, **kw: []
+    @property
+    def _default_link_args(self):
+        """String or list of strings of default linker args."""
+        return get_output('krb5-config --libs gssapi')
 
-if link_args is None:
-    if osx_has_gss_framework:
-        link_args = ['-framework', 'GSS']
-    elif winkrb_path:
-        _libs = os.path.join(
-            winkrb_path, 'lib', 'amd64' if sys.maxsize > 2 ** 32 else 'i386'
+    @property
+    def _default_compile_args(self):
+        """String or list of strings of default compiler args."""
+        return get_output('krb5-config --cflags gssapi')
+
+    @property
+    def _prefix(self):
+        """Path to KRB5 prefix."""
+        try:
+            return get_output('krb5-config gssapi --prefix')
+        except Exception:
+            print("WARNING: couldn't find krb5-config; assuming prefix of %s"
+                  % str(sys.prefix))
+            return sys.prefix
+
+    @property
+    def _gssapi_lib_path(self):
+        """Path to libgssapi.so or gssapi.dll depending on the system."""
+        # To support Heimdal on Debian, read the linker path.
+        main_path = next(
+            (o[4:] for o in self.link_args if o.startswith('-Wl,/')), ''
         )
-        link_args = (
-            ['-L%s' % _libs]
-            + ['-l%s' % os.path.splitext(lib)[0] for lib in os.listdir(_libs)]
-        )
-    elif os.environ.get('MINGW_PREFIX'):
-        link_args = ['-lgss']
-    else:
-        link_args = shlex.split(get_output('krb5-config --libs gssapi'))
-
-if compile_args is None:
-    if osx_has_gss_framework:
-        compile_args = ['-framework', 'GSS', '-DOSX_HAS_GSS_FRAMEWORK']
-    elif winkrb_path:
-        compile_args = [
-            '-I%s' % os.path.join(winkrb_path, 'include'),
-            '-DMS_WIN64'
-        ]
-    elif os.environ.get('MINGW_PREFIX'):
-        compile_args = ['-fPIC']
-    else:
-        compile_args = shlex.split(get_output('krb5-config --cflags gssapi'))
-
-# add in the extra workarounds for different include structures
-if winkrb_path:
-    prefix = winkrb_path
-else:
-    try:
-        prefix = get_output('krb5-config gssapi --prefix')
-    except Exception:
-        print("WARNING: couldn't find krb5-config; assuming prefix of %s"
-              % str(sys.prefix))
-        prefix = sys.prefix
-gssapi_ext_h = os.path.join(prefix, 'include/gssapi/gssapi_ext.h')
-if os.path.exists(gssapi_ext_h):
-    compile_args.append("-DHAS_GSSAPI_EXT_H")
-
-# Create a define to detect msys in the headers
-if sys.platform == 'msys':
-    compile_args.append('-D__MSYS__')
-
-# ensure that any specific directories are listed before any generic system
-# directories inserted by setuptools
-# Also separate out specified libraries as MSBuild requires different args
-_link_args = link_args
-library_dirs, libraries, link_args = [], [], []
-for arg in _link_args:
-    if arg.startswith('-L'):
-        library_dirs.append(arg[2:])
-    elif arg.startswith('-l'):
-        libraries.append(arg[2:])
-    else:
-        link_args.append(arg)
-
-ENABLE_SUPPORT_DETECTION = \
-    (os.environ.get('GSSAPI_SUPPORT_DETECT', 'true').lower() == 'true')
-
-if ENABLE_SUPPORT_DETECTION:
-    import ctypes.util
-
-    main_lib = os.environ.get('GSSAPI_MAIN_LIB', None)
-    main_path = ""
-    if main_lib is None and osx_has_gss_framework:
-        main_lib = ctypes.util.find_library('GSS')
-    elif os.environ.get('MINGW_PREFIX'):
-        main_lib = os.environ.get('MINGW_PREFIX')+'/bin/libgss-3.dll'
-    elif sys.platform == 'msys':
-        # Plain msys, not running in MINGW_PREFIX. Try to get the lib from one
-        _main_lib = (
-            '/mingw%d/bin/libgss-3.dll'
-            % (64 if sys.maxsize > 2 ** 32 else 32)
-        )
-        if os.path.exists(_main_lib):
-            main_lib = _main_lib
-            os.environ['PATH'] += os.pathsep + os.path.dirname(main_lib)
-    elif main_lib is None:
-        for opt in libraries:
+        for opt in self.libraries:
             if opt.startswith('gssapi'):
-                if os.name == 'nt':
-                    main_lib = '%s.dll' % opt
-                    if winkrb_path:
-                        main_path = os.path.join(winkrb_path, 'bin')
-                else:
-                    main_lib = 'lib%s.so' % opt
-        for opt in link_args:
-            # To support Heimdal on Debian, read the linker path.
-            if opt.startswith('-Wl,/'):
-                main_path = opt[4:] + "/"
+                return os.path.join(main_path, 'lib%s.so' % opt)
 
-    if main_lib is None:
-        raise Exception("Could not find main GSSAPI shared library.  Please "
-                        "try setting GSSAPI_MAIN_LIB yourself or setting "
-                        "ENABLE_SUPPORT_DETECTION to 'false'")
+    def make_extension(self, name_fmt, module, **kwargs):
+        """Create extension for the given module using the current config."""
+        source = name_fmt.replace('.', '/') % module + '.' + SOURCE_EXT
+        if not os.path.exists(source):
+            raise OSError(source)
+        return Extension(
+            name_fmt % module,
+            extra_link_args=self.link_args,
+            extra_compile_args=self.compile_args,
+            library_dirs=self.library_dirs,
+            libraries=self.libraries,
+            sources=[source],
+            **kwargs
+        )
 
-    GSSAPI_LIB = ctypes.CDLL(os.path.join(main_path, main_lib))
+
+class DarwinGSSFrameWorkConfig(Config):
+    _default_link_args = ['-framework', 'GSS']
+    _default_compile_args = _default_link_args + ['-DOSX_HAS_GSS_FRAMEWORK']
+
+    @property
+    def _gssapi_lib_path(self):
+        import ctypes.util
+        return ctypes.util.find_library('GSS')
+
+
+class WindowsConfig(Config):
+    def __init__(self):
+        self._krb_path = self._find_krb()
+        self._patch_cygwincc()
+        super().__init__()
+
+    @property
+    def _default_link_args(self):
+        libs = os.path.join(
+            self._krb_path, 'lib', 'amd64' if ARCH == 64 else 'i386'
+        )
+        return (
+            ['-L%s' % libs]
+            + ['-l%s' % os.path.splitext(lib)[0] for lib in os.listdir(libs)]
+        )
+
+    @property
+    def _default_compile_args(self):
+        return ['-I%s' % os.path.join(self._krb_path, 'include'), '-DMS_WIN64']
+
+    @property
+    def _prefix(self):
+        return self._krb_path
+
+    @property
+    def _gssapi_lib_path(self):
+        for opt in self.libraries:
+            if opt.startswith('gssapi'):
+                return os.path.join(self._krb_path, 'bin', '%s.dll' % opt)
+
+    @staticmethod
+    def _find_krb():
+        """Try to find location of MIT kerberos."""
+        # First check program files of the appropriate architecture
+        pf_path = os.path.join(os.environ['ProgramFiles'], 'MIT', 'Kerberos')
+        if os.path.exists(pf_path):
+            return pf_path
+        # Try to detect kinit in PATH
+        kinit_path = shutil.which('kinit')
+        if kinit_path is None:
+            raise OSError("Failed find MIT kerberos!")
+        return os.path.dirname(os.path.dirname(kinit_path))
+
+    @staticmethod
+    def _patch_cygwincc():
+        """
+        Monkey patch distutils if it throws errors getting msvcr.
+        MinGW doesn't need it anyway.
+        """
+        from distutils import cygwinccompiler
+        try:
+            cygwinccompiler.get_msvcr()
+        except ValueError:
+            cygwinccompiler.get_msvcr = lambda *a, **kw: []
+
+
+class MSYSConfig(Config):
+    def __init__(self):
+        super().__init__()
+        # Create a define to detect msys in the headers
+        self.compile_args.append('-D__MSYS__')
+
+    if os.environ.get('MINGW_PREFIX'):
+        _default_link_args = ['-lgss']
+        _default_compile_args = ['-fPIC']
+        _gssapi_lib_path = os.environ.get('MINGW_PREFIX') + '/bin/libgss-3.dll'
+    else:
+        @property
+        def _gssapi_lib_path(self):
+            # Plain msys, not running in MINGW_PREFIX.
+            # Try to get the lib from one of them.
+            main_lib = '/mingw%d/bin/libgss-3.dll' % ARCH
+            if os.path.exists(main_lib):
+                os.environ['PATH'] += os.pathsep + os.path.dirname(main_lib)
+                return main_lib
+
+
+# Choose the right config for the current platform.
+if os.name == 'nt':
+    config = WindowsConfig()
+elif (sys.platform == 'darwin'
+        and [int(v) for v in platform.mac_ver()[0].split('.')] >= [10, 7, 0]):
+    config = DarwinGSSFrameWorkConfig()
+elif sys.platform == 'msys':
+    config = MSYSConfig()
+else:
+    config = Config()
 
 
 # add in the flag that causes us not to compile from Cython when
@@ -224,45 +285,31 @@ class GSSAPIDistribution(Distribution, object):
         del self._cythonized_ext_modules
 
 
-def make_extension(name_fmt, module, **kwargs):
-    """Helper method to remove the repetition in extension declarations."""
-    source = name_fmt.replace('.', '/') % module + '.' + SOURCE_EXT
-    if not os.path.exists(source):
-        raise OSError(source)
-    return Extension(
-        name_fmt % module,
-        extra_link_args=link_args,
-        extra_compile_args=compile_args,
-        library_dirs=library_dirs,
-        libraries=libraries,
-        sources=[source],
-        **kwargs
-    )
-
-
 # detect support
 def main_file(module):
-    return make_extension('gssapi.raw.%s', module)
+    return config.make_extension('gssapi.raw.%s', module)
 
 
 ENUM_EXTS = []
 
 
 def extension_file(module, canary):
-    if ENABLE_SUPPORT_DETECTION and not hasattr(GSSAPI_LIB, canary):
+    if config.enable_support_detect and not hasattr(config.gssapi_lib, canary):
         print('Skipping the %s extension because it '
               'is not supported by your GSSAPI implementation...' % module)
         return
 
     try:
         ENUM_EXTS.append(
-            make_extension('gssapi.raw._enum_extensions.ext_%s', module,
-                           include_dirs=['gssapi/raw/'])
+            config.make_extension(
+                'gssapi.raw._enum_extensions.ext_%s', module,
+                include_dirs=['gssapi/raw/']
+            )
         )
     except OSError:
         pass
 
-    return make_extension('gssapi.raw.ext_%s', module)
+    return config.make_extension('gssapi.raw.ext_%s', module)
 
 
 def gssapi_modules(lst):
@@ -271,7 +318,7 @@ def gssapi_modules(lst):
 
     # add in supported mech files
     res.extend(
-        make_extension('gssapi.raw.mech_%s', mech)
+        config.make_extension('gssapi.raw.mech_%s', mech)
         for mech in os.environ.get('GSSAPI_MECHS', 'krb5').split(',')
     )
 
